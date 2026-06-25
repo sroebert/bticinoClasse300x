@@ -18,6 +18,7 @@ import gzip
 import pyminizip
 import wget
 import re
+import textwrap
 
 class PrepareFirmware():
     """Firmware prepare class."""
@@ -93,6 +94,8 @@ class PrepareFirmware():
         self.url = None
         self.model = None
         self.mnt_loc = '/media/mounted'
+        self.wifi_ssid = None
+        self.wifi_password = None
 
     def main(self):
         """Main function."""
@@ -243,6 +246,23 @@ class PrepareFirmware():
                     time.sleep(1)
             elif step == 7:
                 self.logger.info('State 6 done: notify new firmware: %s', self.notify_new_firmware)
+                # Ask for WiFi installation
+                ask = input(
+                    'Do you want to auto connect to WiFi [y/Y] or no [n/N]? default no [ENTER]: ')
+                if ask in ('y', 'Y'):
+                    self.wifi_ssid = input('Enter the WiFi SSID: ')
+                    self.wifi_password = input('Enter the WiFi password: ')
+
+                    print(f'The intercom will auto connect to WiFi: {self.wifi_ssid}', flush=True)
+                    step = 8
+                elif ask in ('n', 'N', ''):
+                    print('The intercom will not auto connect to WiFi.', flush=True)
+                    step = 8
+                else:
+                    print('Wrong answer ❌', flush=True)
+                    time.sleep(1)
+            elif step == 8:
+                self.logger.info('State 7 done: auto wifi: %s', self.wifi_ssid)
                 dt = time.strftime('%Y%m%d_%H%M%S')
                 if self.install_mqtt == 'y':
                     self.fileout = f'NEW_{self.model}_{version}_MQTT_{dt}.fwz'
@@ -299,6 +319,10 @@ class PrepareFirmware():
         self.setup_ssh_key_rights()
         self.enable_dropbear()
         self.logger.info('Enabled dropbear')
+        self.setup_wifi_config()
+        self.logger.info('Setup WiFi config')
+        self.update_settings_page()
+        self.logger.info('Updated settings page')
         self.save_version(cwd, __version__)
         if self.install_mqtt == 'y':
             ok = self.prepare_mqtt(cwd)
@@ -1037,6 +1061,185 @@ class PrepareFirmware():
             subprocess.run(['sudo', 'chmod', '-R', '755', f'{cwd}/{f}'], check=False)
         print('rights set ✅')
 
+    def setup_wifi_config(self):
+        if self.wifi_ssid is not None and self.wifi_password is not None:
+            print('Setting up auto connect to WiFi... ', end='', flush=True)
+            with open(f'{self.mnt_loc}/etc/connman/wifi.config', 'w', encoding='utf-8') as f:
+                f.write('[service_wifi]\n')
+                f.write('Type = wifi\n')
+                f.write(f'Name = {self.wifi_ssid}\n')
+                f.write(f'Passphrase = {self.wifi_password}\n')
+                f.write('AutoConnect = true\n')
+
+    def update_settings_page(self):
+        with open(f'{self.mnt_loc}/home/bticino/bin/gui/skins/default/SettingsPage.qml', 'w', encoding='utf-8') as f:
+            f.write(
+                textwrap.dedent("""
+                import QtQuick 2.0
+                import BtClass100 1.0
+                import BtObjects 2.0
+                import Components 1.0
+
+                FocusScope {
+                    id: root
+
+                    signal back
+                    signal navigateTo(string pageName, url imageUrl)
+                    property alias count: listView.count
+                    property alias currentIndex: listView.currentIndex
+
+                    CycleMenu {
+                        id: listView
+                        anchors.fill: parent
+
+                        model: menuModel
+                        delegate: Loader {
+                            width: listView.width
+                            height: listView.height
+                            // Without this, PathView doesn't give focus to the delegate, while
+                            // the ListView does.
+                            focus: true
+                            property url sourceImg: model.sourceImg
+                            property var payload: model.payload
+                            sourceComponent: model.component
+                        }
+
+                        Keys.onReturnPressed:  {
+                            if(global.commissioningStatus != Commissioning.StartCommissioning && global.commissioningStatus != Commissioning.RunCommissioning)
+                                listView.currentItem.item.returnPressed()
+                        }
+                        Keys.onUpPressed: {
+                            if(global.commissioningStatus != Commissioning.StartCommissioning && global.commissioningStatus != Commissioning.RunCommissioning)
+                                listView.previousItem()
+                        }
+                        Keys.onDownPressed:
+                        {
+                            if(global.commissioningStatus != Commissioning.StartCommissioning && global.commissioningStatus != Commissioning.RunCommissioning)
+                                listView.nextItem()
+                        }
+                    }
+
+                    ListModel {
+                        id: menuModel
+                        Component.onCompleted: {
+                            menuModel.append({sourceImg: "images/Wi-Fi.png", component: wifiComp})
+                            menuModel.append({sourceImg: "images/Wi-Fi reset.svg", component: resetComp,payload: {pageName: "wifiReset"} })
+                            menuModel.append({sourceImg: "images/Device reset.svg", component: resetComp, payload:{pageName: "deviceReset"} })
+                            menuModel.append({sourceImg: "images/Device reset.svg", component: resetSshComp })
+                            menuModel.append({sourceImg: "images/Device reset.svg", component: rebootComp })
+                            menuModel.append({sourceImg: "images/Exit.svg", component: onlyIcon})
+                        }
+                    }
+
+                    Component {
+                        id: wifiComp
+                        WifiItem {
+                        }
+                    }
+
+                    Component {
+                        id: onlyIcon
+                        Item {
+                            function returnPressed() {
+                                root.back()
+                            }
+
+                            Image {
+                                source: sourceImg
+                                anchors.centerIn: parent
+                            }
+                        }
+                    }
+
+                    Component {
+                        id: resetComp
+                        Item {
+                            function returnPressed() {
+                                console.log("Enter submenu", payload.pageName, sourceImg)
+                                root.navigateTo(payload.pageName, sourceImg)
+                            }
+
+                            Image {
+                                id:img
+                                source: sourceImg
+                                anchors.centerIn: parent
+                            }
+
+                            Text {
+                                id: resetTxt
+                                anchors.top: img.bottom
+                                anchors.topMargin: 15
+                                anchors.horizontalCenter: img.horizontalCenter
+                                text: "RESET"
+                                color: "white"
+                                font.pixelSize: 27
+                                font.bold: true
+                            }
+                        }
+                    }
+
+                    Component {
+                        id: resetSshComp
+                        Item {
+                            function returnPressed() {
+                                var xhr = new XMLHttpRequest()
+                                xhr.open("GET", "http://127.0.0.1:8080/start-dropbear")
+                                xhr.send()
+
+                                root.back()
+                            }
+
+                            Image {
+                                id:img
+                                source: sourceImg
+                                anchors.centerIn: parent
+                            }
+
+                            Text {
+                                id: resetSshTxt
+                                anchors.top: img.bottom
+                                anchors.topMargin: 15
+                                anchors.horizontalCenter: img.horizontalCenter
+                                text: "RESET SSH"
+                                color: "white"
+                                font.pixelSize: 27
+                                font.bold: true
+                            }
+                        }
+                    }
+
+                    Component {
+                        id: rebootComp
+                        Item {
+                            function returnPressed() {
+                                var xhr = new XMLHttpRequest()
+                                xhr.open("GET", "http://127.0.0.1:8080/reboot?now")
+                                xhr.send()
+
+                                root.back()
+                            }
+
+                            Image {
+                                id:img
+                                source: sourceImg
+                                anchors.centerIn: parent
+                            }
+
+                            Text {
+                                id: rebootTxt
+                                anchors.top: img.bottom
+                                anchors.topMargin: 15
+                                anchors.horizontalCenter: img.horizontalCenter
+                                text: "REBOOT"
+                                color: "white"
+                                font.pixelSize: 27
+                                font.bold: true
+                            }
+                        }
+                    }
+                }
+                """).strip()
+            )
 
 if __name__ == '__main__':
     c = PrepareFirmware()
