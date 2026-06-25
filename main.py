@@ -1069,6 +1069,7 @@ class PrepareFirmware():
                 f.write('Type = wifi\n')
                 f.write(f'Name = {self.wifi_ssid}\n')
                 f.write(f'Passphrase = {self.wifi_password}\n')
+                f.write('Security = psk\n')
                 f.write('AutoConnect = true\n')
 
     def update_settings_page(self):
