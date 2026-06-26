@@ -319,6 +319,8 @@ class PrepareFirmware():
         self.setup_ssh_key_rights()
         self.enable_dropbear()
         self.logger.info('Enabled dropbear')
+        self.enable_usb_networking()
+        self.logger.info('Enabled USB networking')
         self.setup_wifi_config()
         self.logger.info('Setup WiFi config')
         self.update_settings_page()
@@ -916,6 +918,20 @@ class PrepareFirmware():
         os.chdir(self.workingdir)
         print('enabled ✅')
 
+    def enable_usb_networking(self):
+        """Enable USB ethernet + SSH at runlevel 5.
+
+        bt-networking.sh only runs in rc4.d by default. Adding it to rc5.d
+        makes the device present itself as a USB ethernet gadget (192.168.129.1)
+        on every normal boot, giving USB SSH access independent of WiFi.
+        """
+        print('Enabling USB networking... ', end='', flush=True)
+        os.chdir(f'{self.mnt_loc}/etc/rc5.d')
+        subprocess.call(['sudo', 'ln', '-s', '../init.d/bt-networking.sh',
+                         'S97-bt-networking.sh'])
+        os.chdir(self.workingdir)
+        print('enabled ✅')
+
     def save_version(self, cwd, version):
         """Save version."""
         print('Saving version... ', end='', flush=True)
@@ -1062,15 +1078,67 @@ class PrepareFirmware():
         print('rights set ✅')
 
     def setup_wifi_config(self):
-        if self.wifi_ssid is not None and self.wifi_password is not None:
-            print('Setting up auto connect to WiFi... ', end='', flush=True)
-            with open(f'{self.mnt_loc}/etc/connman/wifi.config', 'w', encoding='utf-8') as f:
-                f.write('[service_wifi]\n')
-                f.write('Type = wifi\n')
-                f.write(f'Name = {self.wifi_ssid}\n')
-                f.write(f'Passphrase = {self.wifi_password}\n')
-                f.write('Security = psk\n')
-                f.write('AutoConnect = true\n')
+        if self.wifi_ssid is None or self.wifi_password is None:
+            return
+        print('Setting up auto connect to WiFi... ', end='', flush=True)
+        # bt_dbus_manager disables WiFi (SetProperty Powered=false) and deletes
+        # connman service dirs on every boot if it finds no commissioned network.
+        # wifi-seed.sh runs before bt_daemon to pre-seed connman files, then
+        # spawns a 30-second watchdog to re-enable WiFi after bt_dbus_manager
+        # has finished its startup sequence.
+        #
+        # The LED bind-mount locks led_wifi to off before bt_dbus_manager starts,
+        # preventing it from setting the 'timer' (blink) trigger. Writes from
+        # bt_dbus_manager land on the tmpfs dummy files and have no effect.
+        ssid = self.wifi_ssid
+        pwd = self.wifi_password
+
+        wifi_seed_lines = [
+            '#!/bin/sh\n',
+            'DIR=/home/bticino/cfg/extra/72/connman\n',
+            '\n',
+            "printf '[global]\\nOfflineMode=false\\n\\n[WiFi]\\nEnable=true\\nTethering=false\\n' \\\n",
+            '    > "${DIR}/settings" 2>/dev/null || true\n',
+            '\n',
+            f"printf '[service_wifi]\\nType = wifi\\nName = {ssid}\\nPassphrase = {pwd}\\nSecurity = psk\\nAutoConnect = true\\n' \\\n",
+            '    > "${DIR}/wifi.config" 2>/dev/null || true\n',
+            '\n',
+            "_mac=$(cat /sys/class/net/wlan0/address 2>/dev/null | tr -d ':' | tr 'A-F' 'a-f') || true\n",
+            'if [ -n "${_mac}" ] && [ "${_mac}" != "000000000000" ]; then\n',
+            f'    _ssid=$(printf \'%s\' \'{ssid}\' | hexdump -v -e \'1/1 "%02x"\')\n',
+            '    _svc="wifi_${_mac}_${_ssid}_managed_psk"\n',
+            '    mkdir -p "${DIR}/${_svc}" 2>/dev/null || true\n',
+            f"    printf '[%s]\\nName={ssid}\\nSSID=%s\\nFavorite=true\\nAutoConnect=true\\nPassphrase={pwd}\\nIPv4.method=dhcp\\n' \\\n",
+            '        "${_svc}" "${_ssid}" > "${DIR}/${_svc}/settings" 2>/dev/null || true\n',
+            'fi\n',
+            '\n',
+            'if [ -w /sys/class/leds/led_wifi/trigger ]; then\n',
+            '    echo none > /sys/class/leds/led_wifi/trigger    2>/dev/null || true\n',
+            '    echo 0    > /sys/class/leds/led_wifi/brightness 2>/dev/null || true\n',
+            "    printf 'none' > /tmp/led_wifi_trigger\n",
+            "    printf '0'    > /tmp/led_wifi_brightness\n",
+            '    mount --bind /tmp/led_wifi_trigger    /sys/class/leds/led_wifi/trigger    2>/dev/null || true\n',
+            '    mount --bind /tmp/led_wifi_brightness /sys/class/leds/led_wifi/brightness 2>/dev/null || true\n',
+            'fi\n',
+            '\n',
+            '(sleep 30 && connmanctl enable wifi 2>/dev/null || true) &\n',
+        ]
+
+        wifi_seed_path = f'{self.mnt_loc}/etc/wifi-seed.sh'
+        with open(wifi_seed_path, 'w', encoding='utf-8') as f:
+            f.write(''.join(wifi_seed_lines))
+        subprocess.run(['sudo', 'chmod', '+x', wifi_seed_path], check=False)
+
+        bt_daemon_apps = f'{self.mnt_loc}/etc/init.d/bt_daemon-apps.sh'
+        with open(bt_daemon_apps, 'r', encoding='utf-8') as f:
+            contents = f.readlines()
+        for i, line in enumerate(contents):
+            if 'bin/bt_daemon &' in line:
+                contents.insert(i, '\t/etc/wifi-seed.sh\n')
+                break
+        with open(bt_daemon_apps, 'w', encoding='utf-8') as f:
+            f.write(''.join(contents))
+        print('done ✅')
 
     def update_settings_page(self):
         with open(f'{self.mnt_loc}/home/bticino/bin/gui/skins/default/SettingsPage.qml', 'w', encoding='utf-8') as f:
