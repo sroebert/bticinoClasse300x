@@ -1112,6 +1112,17 @@ class PrepareFirmware():
             '        "${_svc}" "${_ssid}" > "${DIR}/${_svc}/settings" 2>/dev/null || true\n',
             'fi\n',
             '\n',
+            '# Fake commissioning state so bt_eliot stops triggering the commissioning\n',
+            '# timeout that disables WiFi. CertOk=1 makes it believe certs are provisioned;\n',
+            '# plantId prevents the "not tied to any plant" re-commissioning loop.\n',
+            '_bt_eliot=/home/bticino/cfg/extra/.bt_eliot/bt_eliot\n',
+            'if [ -f "${_bt_eliot}" ]; then\n',
+            '    grep -q "CertOk=0" "${_bt_eliot}" && \\\n',
+            '        sed -i "s/CertOk=0/CertOk=1/" "${_bt_eliot}" 2>/dev/null || true\n',
+            '    grep -q "plantId=" "${_bt_eliot}" || \\\n',
+            '        echo "plantId=00000000-0000-0000-0000-000000000000" >> "${_bt_eliot}" 2>/dev/null || true\n',
+            'fi\n',
+            '\n',
             'if [ -w /sys/class/leds/led_wifi/trigger ]; then\n',
             '    echo none > /sys/class/leds/led_wifi/trigger    2>/dev/null || true\n',
             '    echo 0    > /sys/class/leds/led_wifi/brightness 2>/dev/null || true\n',
@@ -1121,7 +1132,7 @@ class PrepareFirmware():
             '    mount --bind /tmp/led_wifi_brightness /sys/class/leds/led_wifi/brightness 2>/dev/null || true\n',
             'fi\n',
             '\n',
-            '(sleep 30 && connmanctl enable wifi 2>/dev/null || true) &\n',
+            '(sleep 30; while true; do connmanctl enable wifi 2>/dev/null || true; sleep 5; done) &\n',
         ]
 
         wifi_seed_path = f'{self.mnt_loc}/etc/wifi-seed.sh'
